@@ -142,7 +142,7 @@ The sidecar can be configured using command-line arguments, environment variable
 | Video width | `--width <pixels>` | `VIDEO_WIDTH` | `1280` |
 | Video height | `--height <pixels>` | `VIDEO_HEIGHT` | `720` |
 | Video framerate | `--framerate <fps>` | `VIDEO_FRAMERATE` | `30` |
-| Video bitrate (kbps) | `--video-bitrate <kbps>` | `VIDEO_BITRATE` | `8000` |
+| Video bitrate (kbps) | `--video-bitrate <kbps>` | `VIDEO_BITRATE` | `4000` |
 | Audio bitrate (bps) | `--audio-bitrate <bps>` | `AUDIO_BITRATE` | `128000` |
 | Disable audio | `--no-audio` | `ENABLE_AUDIO=false` | enabled |
 | Debug pipeline | `--debug` | `DEBUG_PIPELINE=true` | disabled |

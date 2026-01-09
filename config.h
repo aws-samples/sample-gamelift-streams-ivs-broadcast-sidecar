@@ -24,7 +24,7 @@ typedef struct {
     gint width;             // Video width (default: 1280)
     gint height;            // Video height (default: 720)
     gint framerate;         // Video framerate (default: 30)
-    gint video_bitrate;     // Video bitrate in kbps (default: 8000)
+    gint video_bitrate;     // Video bitrate in kbps (default: 4000)
     gint audio_bitrate;     // Audio bitrate in bps (default: 128000)
 } Config;
 

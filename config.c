@@ -20,7 +20,7 @@ gboolean parse_configuration(int argc, char *argv[], Config *config) {
     config->width = 1280;               // Default resolution
     config->height = 720;
     config->framerate = 30;             // Default framerate
-    config->video_bitrate = 8000;       // Default video bitrate (kbps)
+    config->video_bitrate = 4000;       // Default video bitrate (kbps)
     config->audio_bitrate = 128000;     // Default audio bitrate (bps)
 
     // First, try to read from environment variables
@@ -183,7 +183,7 @@ void print_usage(const char *program_name) {
     fprintf(stderr, "  --width <pixels>         Video width [default: 1280]\n");
     fprintf(stderr, "  --height <pixels>        Video height [default: 720]\n");
     fprintf(stderr, "  --framerate <fps>        Video framerate [default: 30]\n");
-    fprintf(stderr, "  --video-bitrate <kbps>   Video bitrate in kbps [default: 8000]\n");
+    fprintf(stderr, "  --video-bitrate <kbps>   Video bitrate in kbps [default: 4000]\n");
     fprintf(stderr, "\nAudio options:\n");
     fprintf(stderr, "  --no-audio               Disable audio capture\n");
     fprintf(stderr, "  --audio-bitrate <bps>    Audio bitrate in bps [default: 128000]\n");
