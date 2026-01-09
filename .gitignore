@@ -1,0 +1,6 @@
+.kiro/
+.vscode/
+build-win/*
+build-linux/*
+gamelift-streams-ivs-broadcast-sidecar-sample-linux/*
+gamelift-streams-ivs-broadcast-sidecar-sample-windows/*
