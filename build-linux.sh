@@ -230,8 +230,12 @@ if ! check_gst_plugin "x264enc"; then
 fi
 
 # Video encoding (GPU - optional)
-if check_gst_plugin "nvh264enc" || check_gst_plugin "nvenc_h264"; then
-    print_info "  GPU encoding: available"
+# The application uses nvcudah264enc (CUDA mode) on Linux - see GPU_CONFIG in pipeline.c.
+# Do not probe the legacy nvh264enc here: it is still registered by nvcodec but fails at
+# runtime on NVIDIA driver 595+ with "Selected preset not supported", so its presence is
+# not evidence that GPU encoding works.
+if check_gst_plugin "nvcudah264enc"; then
+    print_info "  GPU encoding: available (nvcudah264enc)"
 else
     print_info "  GPU encoding: not available (will use CPU encoding)"
 fi
@@ -256,6 +260,22 @@ fi
 # Audio buffer split (required for audio pipeline)
 if ! check_gst_plugin "audiobuffersplit"; then
     print_warning "audiobuffersplit plugin not found - audio streaming may not work"
+    PLUGINS_OK=false
+fi
+
+# RTMP streaming plugins
+if ! check_gst_plugin "rtmp2sink"; then
+    print_warning "rtmp2sink plugin not found - RTMP streaming will not work"
+    PLUGINS_OK=false
+fi
+
+if ! check_gst_plugin "flvmux"; then
+    print_warning "flvmux plugin not found - RTMP FLV muxing will not work"
+    PLUGINS_OK=false
+fi
+
+if ! check_gst_plugin "avenc_aac"; then
+    print_warning "avenc_aac plugin not found - AAC audio encoding for RTMP will not work"
     PLUGINS_OK=false
 fi
 

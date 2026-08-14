@@ -99,7 +99,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    g_print("Streaming to WHIP endpoint. Press Ctrl+C to stop.\n");
+    if (config.ingest_type == INGEST_RTMP) {
+        g_print("Streaming to RTMP endpoint. Press Ctrl+C to stop.\n");
+    } else {
+        g_print("Streaming to WHIP endpoint. Press Ctrl+C to stop.\n");
+    }
     
     // Run main loop
     g_main_loop_run(main_loop);

@@ -10,11 +10,11 @@ For an end to end demo, please check out this sample React web application that 
 
 - **Cross-Platform**: Supports Windows and Linux stream class types
 - **Screen Capture**: Hardware-accelerated capture using Direct3D 12 (Windows) or X11 (Linux)
-- **Audio Capture**: System audio capture with Opus encoding
+- **Audio Capture**: System audio capture with Opus encoding (WHIP) or AAC encoding (RTMP)
 - **Video Encoding**: H.264 encoding with CPU (x264) or NVIDIA GPU hardware encoder
 - **Automatic Fallback**: GPU encoder automatically falls back to CPU if hardware unavailable
 - **Low Latency**: Optimized for real-time streaming with zero-latency tuning
-- **WHIP Protocol**: WebRTC-HTTP Ingestion Protocol for reliable streaming
+- **WHIP or RTMP Ingest**: WebRTC-HTTP Ingestion Protocol (default) for IVS real-time stages, or RTMP/RTMPS for IVS low-latency channels
 - **Self-Contained**: Portable packages with all dependencies included
 
 ### Architecture Diagram
@@ -60,6 +60,8 @@ Creates `gamelift-streams-ivs-broadcast-sidecar-sample-windows.zip` with all dep
 <summary><strong>Linux</strong></summary>
 
 GameLift Streams Linux stream groups are based on Ubuntu 22.04 LTS. This application requires the `whipsink` GStreamer plugin for WHIP streaming to IVS, which is part of the GStreamer Rust plugins (`gst-plugins-rs`). Ubuntu 22.04 ships with GStreamer 1.20.x, but `whipsink` requires GStreamer 1.22+. Therefore, you must build GStreamer from source with the Rust plugins enabled.
+
+RTMP ingest additionally requires `rtmp2sink` (gst-plugins-bad), `flvmux` (gst-plugins-good), and `avenc_aac` (gst-libav). The source build below produces all three.
 
 ### Prerequisites
 
@@ -150,6 +152,14 @@ source ~/use-gstreamer.sh
 gst-inspect-1.0 whipsink
 ```
 
+If you plan to use RTMP ingest, verify those elements too:
+
+```bash
+gst-inspect-1.0 rtmp2sink
+gst-inspect-1.0 flvmux
+gst-inspect-1.0 avenc_aac
+```
+
 ### Step 5: Build the Sidecar Application
 
 ```bash
@@ -180,21 +190,57 @@ This sidecar application runs alongside your game application on Amazon GameLift
 
 The sidecar can be configured using command-line arguments, environment variables, or a combination of both. Command-line arguments take precedence over environment variables. This configuration can be passed to the GameLift Streams application when [StartStreamSession](https://docs.aws.amazon.com/gameliftstreams/latest/apireference/API_StartStreamSession.html) is called or through the [Program configurations](https://docs.aws.amazon.com/gameliftstreams/latest/developerguide/streaming-process.html#streaming-process-stream-session) fields if you are testing in the AWS GameLift Streams Console.
 
-> **Note:** For maximum supported video resolution, framerate, and bitrate limits for IVS real-time streaming, see the [IVS Real-Time Streaming ingest specifications](https://docs.aws.amazon.com/ivs/latest/RealTimeUserGuide/rt-stream-ingest.html).
+> **Note:** For maximum supported video resolution, framerate, and bitrate limits, see the [IVS Real-Time Streaming ingest specifications](https://docs.aws.amazon.com/ivs/latest/RealTimeUserGuide/rt-stream-ingest.html) (WHIP) or [Amazon IVS Streaming Configuration](https://docs.aws.amazon.com/ivs/latest/LowLatencyUserGuide/streaming-config.html) (RTMP).
+
+#### Ingest Protocol
+
+The sidecar streams over WHIP by default. Set the ingest type to `rtmp` to stream to an Amazon IVS low-latency channel over RTMP/RTMPS instead. Only the settings for the selected protocol are required; the other protocol's settings are ignored.
 
 | Setting | CLI Argument | Environment Variable | Default |
 |---------|--------------|---------------------|--------|
-| Auth token (required) | `--auth-token <token>` | `IVS_STAGE_TOKEN` | - |
-| WHIP endpoint (required) | `--whip-endpoint <url>` | `IVS_WHIP_ENDPOINT` | - |
+| Ingest protocol | `--ingest-type <whip\|rtmp>` | `INGEST_TYPE` | `whip` |
+
+**WHIP settings** (required when the ingest protocol is `whip`):
+
+| Setting | CLI Argument | Environment Variable | Default |
+|---------|--------------|---------------------|--------|
+| Auth token | `--auth-token <token>` | `IVS_STAGE_TOKEN` | - |
+| WHIP endpoint | `--whip-endpoint <url>` | `IVS_WHIP_ENDPOINT` | - |
+
+**RTMP settings** (required when the ingest protocol is `rtmp`):
+
+| Setting | CLI Argument | Environment Variable | Default |
+|---------|--------------|---------------------|--------|
+| RTMP endpoint | `--rtmp-endpoint <url>` | `RTMP_ENDPOINT` | - |
+| Stream key | `--stream-key <key>` | `STREAM_KEY` | - |
+
+The stream key is appended to the endpoint to form the ingest URL (a trailing `/` on the endpoint is handled either way). For an IVS low-latency channel, use the channel's ingest server as the endpoint and the channel's stream key:
+
+```
+--rtmp-endpoint rtmps://a1b2c3d4e5f6.global-contribute.live-video.net:443/app
+--stream-key sk_us-west-2_abcd1234efgh5678ijkl
+```
+
+This produces `rtmps://a1b2c3d4e5f6.global-contribute.live-video.net:443/app/sk_us-west-2_abcd1234efgh5678ijkl`. RTMPS uses outbound port 443/TCP and must be given as `rtmps://` with the `:443` in the path; plain RTMP uses port 1935 and requires insecure ingest to be enabled on the channel. Audio is encoded as AAC on the RTMP path (IVS low-latency accepts AAC-LC at 96-320 kbps), and video as H.264.
+
+> **Note:** Prefer environment variables for the auth token and stream key. Values passed as command-line arguments are visible to other users on the instance in the process list.
+
+**Common settings:**
+
+| Setting | CLI Argument | Environment Variable | Default |
+|---------|--------------|---------------------|--------|
 | Encoder type | `--encoder <cpu\|gpu>` | `ENCODER_TYPE` | `gpu` |
 | Video width | `--width <pixels>` | `VIDEO_WIDTH` | `1280` |
 | Video height | `--height <pixels>` | `VIDEO_HEIGHT` | `720` |
 | Video framerate | `--framerate <fps>` | `VIDEO_FRAMERATE` | `30` |
 | Video bitrate (kbps) | `--video-bitrate <kbps>` | `VIDEO_BITRATE` | `4000` |
 | Audio bitrate (bps) | `--audio-bitrate <bps>` | `AUDIO_BITRATE` | `128000` |
+| Queue depth (buffers) | `--queue-buffer-size <n>` | `QUEUE_BUFFER_SIZE` | `5` |
 | Disable audio | `--no-audio` | `ENABLE_AUDIO=false` | enabled |
 | Debug pipeline | `--debug` | `DEBUG_PIPELINE=true` | disabled |
 | GStreamer debug level | - | `GST_DEBUG` | `0` |
+
+Queue depth bounds the video buffers held between capture, encoding, and the sink; `0` means unlimited. Raise it if the stream stutters under load, lower it to trade smoothness for latency. Applies to both WHIP and RTMP.
 
 <details>
 <summary><strong>Windows Stream Groups</strong></summary>
@@ -229,6 +275,21 @@ With GPU encoding:
 run_broadcaster.bat --encoder gpu --auth-token YOUR_TOKEN --whip-endpoint https://YOUR_ENDPOINT/whip
 ```
 
+Streaming to an IVS low-latency channel over RTMP:
+
+```cmd
+run_broadcaster.bat --ingest-type rtmp --rtmp-endpoint rtmps://YOUR_INGEST_SERVER:443/app --stream-key YOUR_STREAM_KEY
+```
+
+Using environment variables:
+
+```cmd
+set INGEST_TYPE=rtmp
+set RTMP_ENDPOINT=rtmps://your-ingest-server:443/app
+set STREAM_KEY=your_stream_key
+run_broadcaster.bat
+```
+
 ### Creating and Testing the GLS App with Sidecar
 
 1. **Extract the sidecar package**
@@ -250,9 +311,16 @@ run_broadcaster.bat --encoder gpu --auth-token YOUR_TOKEN --whip-endpoint https:
    - Points to your S3 folder location
    - Uses `run_broadcaster_background.bat` as the launch script
 
-6. **Test in the console** - Launch a stream session and configure the required environment variables:
+6. **Test in the console** - Launch a stream session and configure the required environment variables.
+
+   For WHIP (default):
    - `IVS_STAGE_TOKEN` - Your IVS stage participant token
    - `IVS_WHIP_ENDPOINT` - Your IVS WHIP endpoint URL
+
+   For RTMP:
+   - `INGEST_TYPE` - Set to `rtmp`
+   - `RTMP_ENDPOINT` - Your IVS channel ingest server URL (for example, `rtmps://a1b2c3d4e5f6.global-contribute.live-video.net:443/app`)
+   - `STREAM_KEY` - Your IVS channel stream key
    
    Optionally enable application logs to an S3 bucket to help debug launch issues. See [Streaming Process Documentation](https://docs.aws.amazon.com/gameliftstreams/latest/developerguide/streaming-process.html#streaming-process-stream-session) for details.
 
@@ -261,7 +329,17 @@ run_broadcaster.bat --encoder gpu --auth-token YOUR_TOKEN --whip-endpoint https:
 ### Verify GPU Encoder Availability
 
 ```cmd
-gst-inspect-1.0.exe nvh264enc
+gst-inspect-1.0.exe nvcudah264enc
+```
+
+### Verify RTMP Plugin Availability
+
+RTMP ingest additionally requires these elements (bundled by `package-windows.bat`):
+
+```cmd
+gst-inspect-1.0.exe rtmp2sink
+gst-inspect-1.0.exe flvmux
+gst-inspect-1.0.exe avenc_aac
 ```
 
 ### Troubleshooting
@@ -282,6 +360,12 @@ test-package.bat
 - Verify system audio is working
 - Check Windows audio settings
 - WASAPI loopback requires audio to be actively playing
+
+**RTMP Streaming Issues**
+- Confirm the endpoint and stream key are correct and belong to the same IVS channel
+- Confirm outbound port 443 (RTMPS) or 1935 (RTMP) is not blocked
+- Plain `rtmp://` requires insecure ingest to be enabled on the IVS channel
+- Check that `rtmp2sink`, `flvmux`, and `avenc_aac` are present (see above)
 
 **Enable Debug Logging**
 
@@ -332,6 +416,21 @@ With GPU encoding:
 ./run_broadcaster.sh --encoder gpu --auth-token YOUR_TOKEN --whip-endpoint https://YOUR_ENDPOINT/whip
 ```
 
+Streaming to an IVS low-latency channel over RTMP:
+
+```bash
+./run_broadcaster.sh --ingest-type rtmp --rtmp-endpoint rtmps://YOUR_INGEST_SERVER:443/app --stream-key YOUR_STREAM_KEY
+```
+
+Using environment variables:
+
+```bash
+export INGEST_TYPE=rtmp
+export RTMP_ENDPOINT=rtmps://your-ingest-server:443/app
+export STREAM_KEY=your_stream_key
+./run_broadcaster.sh
+```
+
 ### Creating and Testing the GLS App with Sidecar
 
 1. **Extract the sidecar package**
@@ -353,9 +452,16 @@ With GPU encoding:
    - Points to your S3 folder location
    - Uses `run_broadcaster_background.sh` as the launch script
 
-6. **Test in the console** - Launch a stream session and configure the required environment variables:
+6. **Test in the console** - Launch a stream session and configure the required environment variables.
+
+   For WHIP (default):
    - `IVS_STAGE_TOKEN` - Your IVS stage participant token
    - `IVS_WHIP_ENDPOINT` - Your IVS WHIP endpoint URL
+
+   For RTMP:
+   - `INGEST_TYPE` - Set to `rtmp`
+   - `RTMP_ENDPOINT` - Your IVS channel ingest server URL (for example, `rtmps://a1b2c3d4e5f6.global-contribute.live-video.net:443/app`)
+   - `STREAM_KEY` - Your IVS channel stream key
    
    Optionally enable application logs to an S3 bucket to help debug launch issues. See [Streaming Process Documentation](https://docs.aws.amazon.com/gameliftstreams/latest/developerguide/streaming-process.html#streaming-process-stream-session) for details.
 
@@ -365,7 +471,17 @@ With GPU encoding:
 
 ```bash
 nvidia-smi
-gst-inspect-1.0 nvenc_h264
+gst-inspect-1.0 nvcudah264enc
+```
+
+### Verify RTMP Plugin Availability
+
+RTMP ingest additionally requires these elements (bundled by `package-linux.sh`):
+
+```bash
+gst-inspect-1.0 rtmp2sink
+gst-inspect-1.0 flvmux
+gst-inspect-1.0 avenc_aac
 ```
 
 ### Troubleshooting
@@ -390,12 +506,18 @@ gst-inspect-1.0 opusenc
 gst-inspect-1.0 whipsink
 gst-inspect-1.0 audiobuffersplit
 
+# RTMP ingest only
+gst-inspect-1.0 rtmp2sink
+gst-inspect-1.0 flvmux
+gst-inspect-1.0 avenc_aac
+
 # Install missing plugins
-sudo apt-get install gstreamer1.0-plugins-good  # ximagesrc
+sudo apt-get install gstreamer1.0-plugins-good  # ximagesrc, flvmux
 sudo apt-get install gstreamer1.0-plugins-ugly  # x264enc
 sudo apt-get install gstreamer1.0-plugins-base  # opusenc
-sudo apt-get install gstreamer1.0-plugins-bad   # audiobuffersplit
+sudo apt-get install gstreamer1.0-plugins-bad   # audiobuffersplit, rtmp2sink
 sudo apt-get install gstreamer1.0-plugins-rs    # whipsink (Ubuntu 22.04+)
+sudo apt-get install gstreamer1.0-libav         # avenc_aac
 ```
 
 **Audio Issues**
@@ -410,6 +532,12 @@ pactl list sources short
 # Verify autoaudiosrc works
 gst-launch-1.0 autoaudiosrc ! fakesink
 ```
+
+**RTMP Streaming Issues**
+- Confirm the endpoint and stream key are correct and belong to the same IVS channel
+- Confirm outbound port 443 (RTMPS) or 1935 (RTMP) is not blocked
+- Plain `rtmp://` requires insecure ingest to be enabled on the IVS channel
+- Check that `rtmp2sink`, `flvmux`, and `avenc_aac` are present (see above)
 
 **Enable Debug Logging**
 

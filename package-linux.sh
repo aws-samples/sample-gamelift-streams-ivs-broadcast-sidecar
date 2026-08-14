@@ -180,7 +180,7 @@ print_info "       Copied $PLUGINS_COPIED GStreamer plugins"
 
 # Verify critical plugins were copied
 # Note: In GStreamer 1.24+, videoscale and videoconvert are in libgstvideoconvertscale.so
-CRITICAL_PLUGINS="libgstrswebrtc.so libgstwebrtchttp.so libgstcoreelements.so libgstximagesrc.so libgstx264.so libgstopus.so libgstvideoconvertscale.so libgstvideorate.so"
+CRITICAL_PLUGINS="libgstrswebrtc.so libgstwebrtchttp.so libgstcoreelements.so libgstximagesrc.so libgstx264.so libgstopus.so libgstvideoconvertscale.so libgstvideorate.so libgstrtmp2.so libgstflv.so libgstlibav.so"
 for plugin in $CRITICAL_PLUGINS; do
     if [ ! -f "$PACKAGE_DIR/gstreamer/lib/gstreamer-1.0/$plugin" ]; then
         print_warning "Critical plugin missing: $plugin"
@@ -613,6 +613,9 @@ check_plugin "rswebrtc"
 check_plugin "webrtchttp"
 check_plugin "audiobuffersplit"
 check_plugin "autodetect"
+check_plugin "rtmp2"
+check_plugin "flv"
+check_plugin "libav"
 
 # Test 7: Check whipsink element is available
 echo "[7/8] Checking whipsink element..."
@@ -651,8 +654,13 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo ""
     echo "This is a self-contained package - no system dependencies required."
     echo ""
-    echo "To run the broadcaster:"
+    echo "To run the broadcaster over WHIP (default):"
     echo "  ./run_broadcaster.sh --auth-token YOUR_TOKEN --whip-endpoint YOUR_URL"
+    echo ""
+    echo "To run the broadcaster over RTMP:"
+    echo "  ./run_broadcaster.sh --ingest-type rtmp --rtmp-endpoint YOUR_URL --stream-key YOUR_KEY"
+    echo ""
+    echo "See README.txt for the full option list."
     exit 0
 else
     echo "Some tests failed. Please check the errors above."
@@ -688,6 +696,7 @@ SELF-CONTAINED PACKAGE
 This package is FULLY SELF-CONTAINED and includes all required dependencies:
 - GStreamer 1.24+ core libraries (built from source)
 - GStreamer Rust plugins including whipsink for WHIP streaming
+- rtmp2sink, flvmux and avenc_aac for RTMP streaming
 - GStreamer plugins (video, audio, encoding, WebRTC)
 - All required system libraries
 
@@ -699,22 +708,67 @@ QUICK START
 ================================================================================
 
 1. Test the package:
-   
+
    ./test_package.sh
 
-2. Run the broadcaster:
-   
+2. Run the broadcaster (WHIP, the default):
+
    ./run_broadcaster.sh --auth-token YOUR_TOKEN --whip-endpoint YOUR_URL
 
    Or using environment variables:
-   
+
    export IVS_STAGE_TOKEN=your_token
    export IVS_WHIP_ENDPOINT=https://your-endpoint/whip
    ./run_broadcaster.sh
 
+   To stream to an IVS low-latency channel over RTMP instead:
+
+   ./run_broadcaster.sh --ingest-type rtmp \
+       --rtmp-endpoint rtmps://YOUR_INGEST_SERVER:443/app \
+       --stream-key YOUR_STREAM_KEY
+
+   Or using environment variables:
+
+   export INGEST_TYPE=rtmp
+   export RTMP_ENDPOINT=rtmps://your-ingest-server:443/app
+   export STREAM_KEY=your_stream_key
+   ./run_broadcaster.sh
+
 3. Run in background (for GameLift Streams):
-   
+
    ./run_broadcaster_background.sh --auth-token YOUR_TOKEN --whip-endpoint YOUR_URL
+
+   The background launcher accepts the same options, so the RTMP form above
+   works there too.
+
+================================================================================
+INGEST PROTOCOLS
+================================================================================
+
+The sidecar streams over WHIP by default. Set --ingest-type rtmp (or
+INGEST_TYPE=rtmp) to stream to an Amazon IVS low-latency channel, or to any
+standard RTMP ingest server, instead. Only the settings for the selected
+protocol are required; the other protocol's settings are ignored.
+
+For RTMP, the stream key is appended to the endpoint to form the ingest URL
+(a trailing / on the endpoint is handled either way). Using an IVS channel's
+ingest server and stream key:
+
+  --rtmp-endpoint rtmps://a1b2c3d4e5f6.global-contribute.live-video.net:443/app
+  --stream-key sk_us-west-2_abcd1234efgh5678ijkl
+
+produces:
+
+  rtmps://a1b2c3d4e5f6.global-contribute.live-video.net:443/app/sk_us-west-2_abcd1234efgh5678ijkl
+
+RTMPS uses outbound port 443/TCP and must be given as rtmps:// with the :443
+in the path. Plain rtmp:// uses port 1935 and requires insecure ingest to be
+enabled on the IVS channel. On the RTMP path, video is H.264 and audio is AAC
+(IVS low-latency accepts AAC-LC at 96-320 kbps); WHIP uses Opus audio.
+
+Prefer the environment variables for the auth token and stream key. Values
+passed as command-line arguments are visible to other users on the instance
+in the process list.
 
 ================================================================================
 COMMAND-LINE OPTIONS
@@ -722,19 +776,46 @@ COMMAND-LINE OPTIONS
 
 Usage: ./run_broadcaster.sh [OPTIONS]
 
-Options:
-  --auth-token TOKEN        IVS authentication token (required)
-  --whip-endpoint URL       WHIP endpoint URL (required)
-  --encoder cpu|gpu         Encoder type (default: cpu)
+Ingest protocol:
+  --ingest-type TYPE        Protocol: whip or rtmp (default: whip)
+
+WHIP options (required when the ingest protocol is whip):
+  --auth-token TOKEN        IVS authentication token
+  --whip-endpoint URL       WHIP endpoint URL
+
+RTMP options (required when the ingest protocol is rtmp):
+  --rtmp-endpoint URL       RTMP ingest server URL
+  --stream-key KEY          RTMP stream key
+
+Common options:
+  --encoder cpu|gpu         Encoder type (default: gpu, falls back to cpu)
   --width WIDTH             Video width (default: 1280)
   --height HEIGHT           Video height (default: 720)
   --framerate FPS           Video framerate (default: 30)
   --video-bitrate KBPS      Video bitrate in kbps (default: 4000)
+  --audio-bitrate BPS       Audio bitrate in bps (default: 128000)
+  --queue-buffer-size N     Video queue depth in buffers (default: 5,
+                            0 = unlimited)
+  --no-audio                Disable audio capture
+  --debug                   Print the pipeline string for debugging
   --help                    Show help message
 
 Environment Variables:
+  INGEST_TYPE               Ingest protocol (alternative to --ingest-type)
   IVS_STAGE_TOKEN           Authentication token (alternative to --auth-token)
   IVS_WHIP_ENDPOINT         WHIP endpoint URL (alternative to --whip-endpoint)
+  RTMP_ENDPOINT             RTMP server URL (alternative to --rtmp-endpoint)
+  STREAM_KEY                RTMP stream key (alternative to --stream-key)
+  ENCODER_TYPE              Encoder type (alternative to --encoder)
+  ENABLE_AUDIO              Set to false to disable audio capture
+  QUEUE_BUFFER_SIZE         Video queue depth (alternative to
+                            --queue-buffer-size)
+  VIDEO_WIDTH               Video width (alternative to --width)
+  VIDEO_HEIGHT              Video height (alternative to --height)
+  VIDEO_FRAMERATE           Video framerate (alternative to --framerate)
+  VIDEO_BITRATE             Video bitrate (alternative to --video-bitrate)
+  AUDIO_BITRATE             Audio bitrate (alternative to --audio-bitrate)
+  DEBUG_PIPELINE            Set to true to print the pipeline string
   GST_DEBUG                 GStreamer debug level (0-5, default: 0)
 
 ================================================================================
@@ -753,7 +834,7 @@ gamelift-streams-ivs-broadcast-sidecar-sample-linux/
 │   │   └── gst-plugin-scanner          # Plugin scanner
 │   └── lib/
 │       └── gstreamer-1.0/
-│           └── *.so                    # GStreamer plugins (including whipsink)
+│           └── *.so                    # GStreamer plugins (incl. whipsink, rtmp2sink)
 ├── run_broadcaster.sh                  # Main launcher script
 ├── run_broadcaster_background.sh       # Background launcher
 ├── test_package.sh                     # Package test script
@@ -827,5 +908,6 @@ echo ""
 echo "To deploy to GameLift Streams:"
 echo "  1. Upload: $TARBALL_NAME"
 echo "  2. Extract: tar -xzvf $TARBALL_NAME"
-echo "  3. Run: ./$PACKAGE_DIR/run_broadcaster.sh --auth-token TOKEN --whip-endpoint URL"
+echo "  3. Run (WHIP):  ./$PACKAGE_DIR/run_broadcaster.sh --auth-token TOKEN --whip-endpoint URL"
+echo "     Run (RTMP):  ./$PACKAGE_DIR/run_broadcaster.sh --ingest-type rtmp --rtmp-endpoint URL --stream-key KEY"
 echo ""

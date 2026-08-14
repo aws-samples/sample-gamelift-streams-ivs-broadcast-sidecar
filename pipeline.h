@@ -27,11 +27,10 @@
  * WHIP: whipsink (handles WebRTC negotiation and WHIP protocol)
  * 
  * Encoder selection:
- * - GPU (Windows): nvh264enc (NVIDIA)
- * - GPU (Linux): nvenc_h264 (NVIDIA)
+ * - GPU (cross-platform): nvcudah264enc (NVIDIA, CUDA mode)
  * - CPU (cross-platform): x264enc
  * - Automatic fallback from GPU to CPU if hardware not available
- * 
+ *
  * @param config Pointer to Config structure containing auth token, endpoint, and encoder type
  * @param error Pointer to GError pointer for error reporting (can be NULL)
  * @return GstElement pointer to the created pipeline, or NULL on failure
@@ -48,7 +47,7 @@ GstElement* create_pipeline(const Config *config, GError **error);
 gboolean set_pipeline_state(GstElement *pipeline, GstState state);
 
 /**
- * Check if GPU encoder (nvh264enc) is available on the system.
+ * Check if GPU encoder (nvcudah264enc) is available on the system.
  * 
  * @return TRUE if GPU encoder is available, FALSE otherwise
  */
