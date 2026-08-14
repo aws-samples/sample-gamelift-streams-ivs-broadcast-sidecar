@@ -152,6 +152,7 @@ set ESSENTIAL_PLUGINS=%ESSENTIAL_PLUGINS% gstnice.dll gstsrtp.dll gstdtls.dll gs
 set ESSENTIAL_PLUGINS=%ESSENTIAL_PLUGINS% gstplayback.dll gsttypefindfunctions.dll gstautodetect.dll
 set ESSENTIAL_PLUGINS=%ESSENTIAL_PLUGINS% gstvideoparsersbad.dll gstaudioparsers.dll
 set ESSENTIAL_PLUGINS=%ESSENTIAL_PLUGINS% gstapp.dll gstgio.dll gstdirectsoundsrc.dll
+set ESSENTIAL_PLUGINS=%ESSENTIAL_PLUGINS% gstrtmp2.dll gstflv.dll gstlibav.dll
 
 REM Verify essential plugins exist
 set MISSING_PLUGINS=
@@ -187,6 +188,18 @@ if not exist "%PACKAGE_DIR%\gstreamer\lib\gstreamer-1.0\gstx264.dll" (
 )
 if not exist "%PACKAGE_DIR%\gstreamer\lib\gstreamer-1.0\gstopus.dll" (
     echo       [MISSING] gstopus.dll - Opus audio encoding will not work!
+    set CRITICAL_OK=0
+)
+if not exist "%PACKAGE_DIR%\gstreamer\lib\gstreamer-1.0\gstrtmp2.dll" (
+    echo       [MISSING] gstrtmp2.dll - RTMP streaming will not work!
+    set CRITICAL_OK=0
+)
+if not exist "%PACKAGE_DIR%\gstreamer\lib\gstreamer-1.0\gstflv.dll" (
+    echo       [MISSING] gstflv.dll - FLV muxing for RTMP will not work!
+    set CRITICAL_OK=0
+)
+if not exist "%PACKAGE_DIR%\gstreamer\lib\gstreamer-1.0\gstlibav.dll" (
+    echo       [MISSING] gstlibav.dll - AAC audio encoding for RTMP will not work!
     set CRITICAL_OK=0
 )
 if !CRITICAL_OK!==1 (
@@ -267,8 +280,10 @@ echo set GST_REGISTRY=%%PACKAGE_ROOT%%gstreamer-registry.bin
 echo set GST_DEBUG=0
 echo.
 echo REM Start the broadcaster in background with logging ^(minimized^)
-echo REM Be sure to set IVS_STAGE_TOKEN and IVS_WHIP_ENDPOINT env vars
-echo REM or pass --auth-token and --whip-endpoint arguments
+echo REM For WHIP ^(the default^), set IVS_STAGE_TOKEN and IVS_WHIP_ENDPOINT env
+echo REM vars, or pass --auth-token and --whip-endpoint arguments
+echo REM For RTMP, set INGEST_TYPE=rtmp plus RTMP_ENDPOINT and STREAM_KEY env
+echo REM vars, or pass --ingest-type rtmp --rtmp-endpoint and --stream-key
 echo if not exist "%%PACKAGE_ROOT%%logs" mkdir "%%PACKAGE_ROOT%%logs"
 echo start /MIN "GameLift-IVS-Broadcaster" cmd /c "%%PACKAGE_ROOT%%bin\gamelift-streams-ivs-broadcast-sidecar-sample.exe" %%* ^> "%%PACKAGE_ROOT%%logs\broadcaster.log" 2^>^&1
 echo.
@@ -327,6 +342,12 @@ echo "%%PACKAGE_ROOT%%gstreamer\bin\gst-inspect-1.0.exe" opusenc ^>nul 2^>^&1
 echo if errorlevel 1 ^(echo       [WARN] opusenc not found^) else ^(echo       [OK] opusenc^)
 echo "%%PACKAGE_ROOT%%gstreamer\bin\gst-inspect-1.0.exe" wasapisrc ^>nul 2^>^&1
 echo if errorlevel 1 ^(echo       [WARN] wasapisrc not found^) else ^(echo       [OK] wasapisrc^)
+echo "%%PACKAGE_ROOT%%gstreamer\bin\gst-inspect-1.0.exe" rtmp2sink ^>nul 2^>^&1
+echo if errorlevel 1 ^(echo       [WARN] rtmp2sink not found^) else ^(echo       [OK] rtmp2sink^)
+echo "%%PACKAGE_ROOT%%gstreamer\bin\gst-inspect-1.0.exe" flvmux ^>nul 2^>^&1
+echo if errorlevel 1 ^(echo       [WARN] flvmux not found^) else ^(echo       [OK] flvmux^)
+echo "%%PACKAGE_ROOT%%gstreamer\bin\gst-inspect-1.0.exe" avenc_aac ^>nul 2^>^&1
+echo if errorlevel 1 ^(echo       [WARN] avenc_aac not found^) else ^(echo       [OK] avenc_aac^)
 echo.
 echo echo [4/4] Testing application...
 echo "%%PACKAGE_ROOT%%bin\gamelift-streams-ivs-broadcast-sidecar-sample.exe" --help 2^>^&1 ^| findstr /C:"Usage:" ^>nul
@@ -388,9 +409,13 @@ echo To test the package:
 echo   cd %PACKAGE_DIR%
 echo   test_package.bat
 echo.
-echo To run the broadcaster:
+echo To run the broadcaster over WHIP (default):
 echo   cd %PACKAGE_DIR%
 echo   run_broadcaster.bat --auth-token YOUR_TOKEN --whip-endpoint YOUR_URL
+echo.
+echo To run the broadcaster over RTMP:
+echo   cd %PACKAGE_DIR%
+echo   run_broadcaster.bat --ingest-type rtmp --rtmp-endpoint YOUR_URL --stream-key YOUR_KEY
 echo.
 
 endlocal

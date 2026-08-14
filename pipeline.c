@@ -2,10 +2,18 @@
 #include <stdio.h>
 #include <string.h>
 
-// Maximum allowed length for auth token and endpoint to prevent buffer overflow
+// Sanity bounds on caller-supplied credentials and URLs. The pipeline string is
+// built in a GString and all inputs are copied with g_strdup_printf, so these are
+// not needed to prevent an overflow - they reject implausible input early and keep
+// a malformed value from producing an enormous pipeline description.
 #define MAX_TOKEN_LENGTH 1024
 #define MAX_ENDPOINT_LENGTH 1024
+
+// Initial GString allocation for the pipeline description (a hint, not a cap).
 #define PIPELINE_BUFFER_SIZE 4096
+
+// Fallback queue depth when a caller supplies a negative value directly.
+#define DEFAULT_QUEUE_BUFFER_SIZE 5
 
 // State change timeout in seconds
 #define STATE_CHANGE_TIMEOUT_SEC 10
@@ -72,6 +80,30 @@ static gchar* escape_pipeline_string(const char *input) {
     return g_string_free(escaped, FALSE);
 }
 
+/**
+ * Build the full RTMP URL from endpoint and stream key.
+ * Ensures exactly one '/' separator between endpoint and stream key.
+ * The returned URL is escaped for use in pipeline descriptions.
+ * Caller must free the returned string with g_free().
+ */
+static gchar* build_rtmp_url(const char *endpoint, const char *stream_key) {
+    if (!endpoint || !stream_key) return NULL;
+
+    size_t ep_len = strlen(endpoint);
+    gboolean has_trailing_slash = (ep_len > 0 && endpoint[ep_len - 1] == '/');
+
+    gchar *raw_url;
+    if (has_trailing_slash) {
+        raw_url = g_strdup_printf("%s%s", endpoint, stream_key);
+    } else {
+        raw_url = g_strdup_printf("%s/%s", endpoint, stream_key);
+    }
+
+    gchar *escaped = escape_pipeline_string(raw_url);
+    g_free(raw_url);
+    return escaped;
+}
+
 
 /**
  * Validate configuration parameters.
@@ -84,37 +116,75 @@ static gboolean validate_config(const Config *config, GError **error) {
                    "Configuration is NULL");
         return FALSE;
     }
-    
-    if (!config->auth_token || strlen(config->auth_token) == 0) {
-        g_set_error(error, 
-                   g_quark_from_static_string("pipeline-config"),
-                   2,
-                   "Missing authentication token");
-        return FALSE;
-    }
-    
-    if (!config->whip_endpoint || strlen(config->whip_endpoint) == 0) {
-        g_set_error(error, 
-                   g_quark_from_static_string("pipeline-config"),
-                   3,
-                   "Missing WHIP endpoint");
-        return FALSE;
-    }
-    
-    if (strlen(config->auth_token) > MAX_TOKEN_LENGTH) {
-        g_set_error(error, 
-                   g_quark_from_static_string("pipeline-config"),
-                   4,
-                   "Authentication token exceeds maximum length (%d)", MAX_TOKEN_LENGTH);
-        return FALSE;
-    }
-    
-    if (strlen(config->whip_endpoint) > MAX_ENDPOINT_LENGTH) {
-        g_set_error(error, 
-                   g_quark_from_static_string("pipeline-config"),
-                   5,
-                   "WHIP endpoint exceeds maximum length (%d)", MAX_ENDPOINT_LENGTH);
-        return FALSE;
+
+    if (config->ingest_type == INGEST_RTMP) {
+        // RTMP validation: require rtmp_endpoint and stream_key
+        if (!config->rtmp_endpoint || strlen(config->rtmp_endpoint) == 0) {
+            g_set_error(error,
+                       g_quark_from_static_string("pipeline-config"),
+                       2,
+                       "Missing RTMP endpoint");
+            return FALSE;
+        }
+
+        if (!config->stream_key || strlen(config->stream_key) == 0) {
+            g_set_error(error,
+                       g_quark_from_static_string("pipeline-config"),
+                       3,
+                       "Missing RTMP stream key");
+            return FALSE;
+        }
+
+        if (strlen(config->rtmp_endpoint) > MAX_ENDPOINT_LENGTH) {
+            g_set_error(error,
+                       g_quark_from_static_string("pipeline-config"),
+                       5,
+                       "RTMP endpoint exceeds maximum length (%d)", MAX_ENDPOINT_LENGTH);
+            return FALSE;
+        }
+
+        // Bound the stream key too - it is a credential concatenated into the
+        // RTMP URL, so it gets the same treatment as the WHIP auth token.
+        if (strlen(config->stream_key) > MAX_TOKEN_LENGTH) {
+            g_set_error(error,
+                       g_quark_from_static_string("pipeline-config"),
+                       4,
+                       "RTMP stream key exceeds maximum length (%d)", MAX_TOKEN_LENGTH);
+            return FALSE;
+        }
+    } else {
+        // WHIP validation: require auth_token and whip_endpoint
+        if (!config->auth_token || strlen(config->auth_token) == 0) {
+            g_set_error(error, 
+                       g_quark_from_static_string("pipeline-config"),
+                       2,
+                       "Missing authentication token");
+            return FALSE;
+        }
+        
+        if (!config->whip_endpoint || strlen(config->whip_endpoint) == 0) {
+            g_set_error(error, 
+                       g_quark_from_static_string("pipeline-config"),
+                       3,
+                       "Missing WHIP endpoint");
+            return FALSE;
+        }
+        
+        if (strlen(config->auth_token) > MAX_TOKEN_LENGTH) {
+            g_set_error(error, 
+                       g_quark_from_static_string("pipeline-config"),
+                       4,
+                       "Authentication token exceeds maximum length (%d)", MAX_TOKEN_LENGTH);
+            return FALSE;
+        }
+        
+        if (strlen(config->whip_endpoint) > MAX_ENDPOINT_LENGTH) {
+            g_set_error(error, 
+                       g_quark_from_static_string("pipeline-config"),
+                       5,
+                       "WHIP endpoint exceeds maximum length (%d)", MAX_ENDPOINT_LENGTH);
+            return FALSE;
+        }
     }
     
     return TRUE;
@@ -153,6 +223,12 @@ static const EncoderConfig* select_encoder(const Config *config, EncoderType *ac
  * Uses platform-specific capture elements:
  * - Windows: d3d12screencapturesrc with D3D12 processing
  * - Linux: ximagesrc with videoconvert for format conversion
+ *
+ * Anti-stutter strategy:
+ * - Capture queue: decouples screen capture from downstream processing
+ * - Pre-encoder queue: absorbs timing jitter before encoding
+ * - Post-encoder queue: smooths encoder output bursts before the sink
+ * Queue depth is configurable via queue_buffer_size (default: 5).
  */
 static void build_video_pipeline(GString *pipeline, const Config *config, 
                                   const EncoderConfig *enc, EncoderType actual_encoder) {
@@ -162,6 +238,10 @@ static void build_video_pipeline(GString *pipeline, const Config *config,
     int framerate = config->framerate > 0 ? config->framerate : 30;
     int bitrate = config->video_bitrate > 0 ? config->video_bitrate : 4000;
     int gop_size = framerate * 2;  // 2 second GOP
+    // 0 means unlimited; a negative value would wrap when assigned to the queue's
+    // unsigned max-size-buffers property, so fall back to the default instead.
+    int qsize = config->queue_buffer_size >= 0
+                ? config->queue_buffer_size : DEFAULT_QUEUE_BUFFER_SIZE;
     
     // Build encoder properties string
     // GPU encoder only uses bitrate, CPU encoder uses bitrate and gop_size
@@ -174,35 +254,106 @@ static void build_video_pipeline(GString *pipeline, const Config *config,
     
 #ifdef PLATFORM_WINDOWS
     // Windows: Use D3D12 for hardware-accelerated screen capture
-    // whipsink uses sink_0 for video and expects RTP payloaded streams
+    // Three queues to prevent stuttering:
+    //   1. After capture/download: decouples capture from encoder backpressure
+    //   2. Before encoder: absorbs timing variations
+    //   3. After encoder: smooths output before RTP payloading/sink
     g_string_append_printf(pipeline,
         "d3d12screencapturesrc ! "
         "d3d12convert ! "
         "d3d12download ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=0 leaky=2 ! "
         "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1 ! "
-        "queue max-size-buffers=2 leaky=2 ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=2 ! "
         "%s %s ! "
         "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=0 ! "
         "rtph264pay config-interval=1 pt=96 ! "
         "whip.sink_0 ",
-        enc->format, width, height, framerate,
-        enc->element, enc_props);
+        qsize, enc->format, width, height, framerate,
+        qsize, enc->element, enc_props,
+        qsize);
 #else
     // Linux: Use ximagesrc for X11-based screen capture
-    // whipclientsink expects encoded video directly (handles RTP internally)
-    // Use video_%u pad template as per whipclientsink documentation
+    // Three queues to prevent stuttering (mirrors Windows strategy):
+    //   1. After videoconvert/scale/rate: decouples capture from encoder backpressure
+    //   2. Before encoder: absorbs timing variations
+    //   3. After encoder: smooths output before the sink
     g_string_append_printf(pipeline,
         "ximagesrc use-damage=false ! "
         "videoconvert ! "
         "videoscale ! "
         "videorate ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=0 leaky=2 ! "
         "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1 ! "
-        "queue max-size-buffers=2 leaky=2 ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=2 ! "
         "%s %s ! "
         "h264parse ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=0 ! "
         "whip.video_0 ",
-        enc->format, width, height, framerate,
-        enc->element, enc_props);
+        qsize, enc->format, width, height, framerate,
+        qsize, enc->element, enc_props,
+        qsize);
+#endif
+}
+
+/**
+ * Build the RTMP video pipeline string.
+ * Reuses platform-specific capture and encoder selection from WHIP,
+ * but routes through h264parse into flvmux instead of RTP payloading into whipsink.
+ *
+ * Anti-stutter strategy mirrors the WHIP pipeline: capture queue, pre-encoder
+ * queue, and post-encoder queue on Windows. Queue depth is configurable.
+ */
+static void build_rtmp_video_pipeline(GString *pipeline, const Config *config,
+                                       const EncoderConfig *enc, EncoderType actual_encoder) {
+    int width = config->width > 0 ? config->width : 1280;
+    int height = config->height > 0 ? config->height : 720;
+    int framerate = config->framerate > 0 ? config->framerate : 30;
+    int bitrate = config->video_bitrate > 0 ? config->video_bitrate : 4000;
+    int gop_size = framerate * 2;
+    // See build_video_pipeline: guard against a negative wrapping to unbounded.
+    int qsize = config->queue_buffer_size >= 0
+                ? config->queue_buffer_size : DEFAULT_QUEUE_BUFFER_SIZE;
+
+    char enc_props[256];
+    if (actual_encoder == ENCODER_GPU) {
+        snprintf(enc_props, sizeof(enc_props), enc->props_format, bitrate);
+    } else {
+        snprintf(enc_props, sizeof(enc_props), enc->props_format, bitrate, gop_size);
+    }
+
+#ifdef PLATFORM_WINDOWS
+    g_string_append_printf(pipeline,
+        "d3d12screencapturesrc ! "
+        "d3d12convert ! "
+        "d3d12download ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=0 leaky=2 ! "
+        "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1 ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=2 ! "
+        "%s %s ! "
+        "h264parse ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=0 ! "
+        "mux.video ",
+        qsize, enc->format, width, height, framerate,
+        qsize, enc->element, enc_props,
+        qsize);
+#else
+    g_string_append_printf(pipeline,
+        "ximagesrc use-damage=false ! "
+        "videoconvert ! "
+        "videoscale ! "
+        "videorate ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=0 leaky=2 ! "
+        "video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1 ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=2 ! "
+        "%s %s ! "
+        "h264parse ! "
+        "queue max-size-buffers=%d max-size-bytes=0 max-size-time=500000000 leaky=0 ! "
+        "mux.video ",
+        qsize, enc->format, width, height, framerate,
+        qsize, enc->element, enc_props,
+        qsize);
 #endif
 }
 
@@ -244,14 +395,51 @@ static void build_audio_pipeline(GString *pipeline, const Config *config) {
     // The monitor source captures all audio output (game sounds, etc.)
     // whipclientsink handles opus encoding internally - send raw audio directly
     // Use audio_%u pad template as per whipclientsink documentation
+    // Two queues: capture-side to decouple PulseAudio, pre-sink to absorb jitter
     (void)audio_bitrate;  // Not used - whipclientsink handles encoding
     g_string_append_printf(pipeline,
         "pulsesrc ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=300000000 ! "
         "audioconvert ! "
         "audioresample ! "
         "audio/x-raw,rate=48000,channels=2,format=S16LE ! "
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 ! "
         "whip.audio_0");
+#endif
+}
+
+/**
+ * Build the RTMP audio pipeline string.
+ * Uses platform-specific audio capture, then encodes to AAC for FLV compatibility.
+ * Routes into flvmux audio pad instead of whipsink.
+ */
+static void build_rtmp_audio_pipeline(GString *pipeline, const Config *config) {
+    int audio_bitrate = config->audio_bitrate > 0 ? config->audio_bitrate : 128000;
+
+#ifdef PLATFORM_WINDOWS
+    // Two queues, matching the Linux RTMP path and the Windows WHIP path:
+    // capture-side to decouple WASAPI, pre-encoder to absorb jitter.
+    g_string_append_printf(pipeline,
+        "wasapi2src loopback=true ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=300000000 ! "
+        "audioconvert ! "
+        "audioresample ! "
+        "audio/x-raw,rate=48000,channels=2 ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 ! "
+        "avenc_aac bitrate=%d ! "
+        "mux.audio",
+        audio_bitrate);
+#else
+    g_string_append_printf(pipeline,
+        "pulsesrc ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=300000000 ! "
+        "audioconvert ! "
+        "audioresample ! "
+        "audio/x-raw,rate=48000,channels=2 ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 ! "
+        "avenc_aac bitrate=%d ! "
+        "mux.audio",
+        audio_bitrate);
 #endif
 }
 
@@ -279,28 +467,13 @@ static void build_audio_pipeline(GString *pipeline, const Config *config) {
  * WHIP: whipsink (handles WebRTC and WHIP protocol)
  * 
  * Encoder selection:
- * - GPU (Windows): nvh264enc (NVIDIA)
- * - GPU (Linux): nvenc_h264 (NVIDIA)
+ * - GPU (cross-platform): nvcudah264enc (NVIDIA, CUDA mode)
  * - CPU (cross-platform): x264enc
  * - Automatic fallback from GPU to CPU if hardware not available
  */
 GstElement* create_pipeline(const Config *config, GError **error) {
     // Validate configuration
     if (!validate_config(config, error)) {
-        return NULL;
-    }
-
-    // Escape special characters in auth token and endpoint
-    gchar *escaped_token = escape_pipeline_string(config->auth_token);
-    gchar *escaped_endpoint = escape_pipeline_string(config->whip_endpoint);
-    
-    if (!escaped_token || !escaped_endpoint) {
-        g_free(escaped_token);
-        g_free(escaped_endpoint);
-        g_set_error(error,
-                   g_quark_from_static_string("pipeline-config"),
-                   6,
-                   "Failed to escape configuration strings");
         return NULL;
     }
 
@@ -316,30 +489,69 @@ GstElement* create_pipeline(const Config *config, GError **error) {
 
     // Build pipeline string dynamically
     GString *pipeline_str = g_string_sized_new(PIPELINE_BUFFER_SIZE);
-    
-    // WHIP sink configuration
-    // Windows: whipsink works correctly
-    // Linux: whipclientsink is required (whipsink doesn't trigger WebRTC offer in GStreamer 1.24+)
-    // Note: whipclientsink uses signaller:: prefix for properties
+
+    if (config->ingest_type == INGEST_RTMP) {
+        // --- RTMP pipeline ---
+        gchar *rtmp_url = build_rtmp_url(config->rtmp_endpoint, config->stream_key);
+        if (!rtmp_url) {
+            g_set_error(error,
+                       g_quark_from_static_string("pipeline-config"),
+                       6,
+                       "Failed to construct RTMP URL");
+            g_string_free(pipeline_str, TRUE);
+            return NULL;
+        }
+
+        // flvmux + rtmp2sink header
+        g_string_append_printf(pipeline_str,
+            "flvmux name=mux streamable=true ! rtmp2sink location=\"%s\" ",
+            rtmp_url);
+        g_free(rtmp_url);
+
+        // Add RTMP video pipeline
+        build_rtmp_video_pipeline(pipeline_str, config, enc, actual_encoder);
+
+        // Add RTMP audio pipeline if enabled
+        if (config->enable_audio) {
+            build_rtmp_audio_pipeline(pipeline_str, config);
+        }
+    } else {
+        // --- WHIP pipeline (existing behavior) ---
+        gchar *escaped_token = escape_pipeline_string(config->auth_token);
+        gchar *escaped_endpoint = escape_pipeline_string(config->whip_endpoint);
+
+        if (!escaped_token || !escaped_endpoint) {
+            g_free(escaped_token);
+            g_free(escaped_endpoint);
+            g_set_error(error,
+                       g_quark_from_static_string("pipeline-config"),
+                       6,
+                       "Failed to escape configuration strings");
+            g_string_free(pipeline_str, TRUE);
+            return NULL;
+        }
+
+        // WHIP sink configuration
 #ifdef PLATFORM_WINDOWS
-    g_string_append_printf(pipeline_str,
-        "whipsink name=whip auth-token=\"%s\" whip-endpoint=\"%s\" ",
-        escaped_token, escaped_endpoint);
+        g_string_append_printf(pipeline_str,
+            "whipsink name=whip auth-token=\"%s\" whip-endpoint=\"%s\" ",
+            escaped_token, escaped_endpoint);
 #else
-    g_string_append_printf(pipeline_str,
-        "whipclientsink name=whip signaller::auth-token=\"%s\" signaller::whip-endpoint=\"%s\" ",
-        escaped_token, escaped_endpoint);
+        g_string_append_printf(pipeline_str,
+            "whipclientsink name=whip signaller::auth-token=\"%s\" signaller::whip-endpoint=\"%s\" ",
+            escaped_token, escaped_endpoint);
 #endif
-    
-    g_free(escaped_token);
-    g_free(escaped_endpoint);
-    
-    // Add video pipeline
-    build_video_pipeline(pipeline_str, config, enc, actual_encoder);
-    
-    // Add audio pipeline if enabled
-    if (config->enable_audio) {
-        build_audio_pipeline(pipeline_str, config);
+
+        g_free(escaped_token);
+        g_free(escaped_endpoint);
+
+        // Add video pipeline
+        build_video_pipeline(pipeline_str, config, enc, actual_encoder);
+
+        // Add audio pipeline if enabled
+        if (config->enable_audio) {
+            build_audio_pipeline(pipeline_str, config);
+        }
     }
     
     // Debug output if requested
@@ -409,9 +621,7 @@ gboolean set_pipeline_state(GstElement *pipeline, GstState state) {
 /**
  * Check if GPU encoder is available on the system.
  * Useful for UI or configuration to determine available options.
- * Uses platform-specific GPU encoder:
- * - Windows: nvh264enc
- * - Linux: nvenc_h264
+ * Uses nvcudah264enc (NVIDIA CUDA mode) on all platforms.
  */
 gboolean is_gpu_encoder_available(void) {
     return is_element_available(get_gpu_encoder_name());
